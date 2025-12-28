@@ -38,6 +38,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 ua = UserAgent()
 
 counter_lock = threading.Lock()
+file_lock = threading.Lock()  # <--- YE ADD KARO
 active_validation = {}
 active_sessions = {}
 proxy_dead_alert_sent = {}
@@ -54,34 +55,41 @@ def load_data(filename, default_type=list):
         return default_type()
 
 def save_data(filename, data):
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            if filename.endswith('.json'):
-                json.dump(data, f, indent=4)
-            else:
-                f.write("\n".join(data))
-    except Exception as e:
-        print(f"Error saving {filename}: {e}")
+    with file_lock:  # <--- YE LOCK ZAROORI HAI
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                if filename.endswith('.json'):
+                    json.dump(data, f, indent=4)
+                else:
+                    f.write("\n".join(data))
+        except Exception as e:
+            print(f"Error saving {filename}: {e}")
 
 def remove_dead_site(dead_url, chat_id=None):
-    try:
-        current_sites = load_data(SITES_FILE)
-        if dead_url in current_sites:
-            current_sites.remove(dead_url)
-            save_data(SITES_FILE, current_sites)
-            if chat_id:
-                try:
-                    bot.send_message(chat_id,
-                        "☢️ **CONTAMINATED TARGET PURGED** ☢️\n"
-                        "──────────────────────────────\n"
-                        f"☣ `{dead_url}`\n"
-                        "Reason: Dead/Offline\n"
-                        "──────────────────────────────\n"
-                        "Database sterilized", 
-                        parse_mode="Markdown")
-                except: pass
-    except Exception as e:
-        print(f"Error removing dead site: {e}")
+    # Lock lagaya taaki ek baar me ek hi thread file edit kare
+    with file_lock: 
+        try:
+            current_sites = load_data(SITES_FILE)
+            if dead_url in current_sites:
+                current_sites.remove(dead_url)
+                
+                # Manual save logic with lock inside
+                with open(SITES_FILE, 'w', encoding='utf-8') as f:
+                    f.write("\n".join(current_sites))
+                
+                if chat_id:
+                    try:
+                        bot.send_message(chat_id,
+                            "☢️ **CONTAMINATED TARGET PURGED** ☢️\n"
+                            "──────────────────────────────\n"
+                            f"☣ `{dead_url}`\n"
+                            "Reason: Dead/Offline\n"
+                            "──────────────────────────────\n"
+                            "Database sterilized", 
+                            parse_mode="Markdown")
+                    except: pass
+        except Exception as e:
+            print(f"Error removing dead site: {e}")
 
 users_db = load_data(USERS_FILE, dict)
 if str(ADMIN_ID) not in users_db:
@@ -168,8 +176,15 @@ def verify_site(url, proxy=None):
         api_req = f"{API_URL}?cc=5196032154986133|07|27|000&url={urllib.parse.quote(url)}"
         if proxy and proxy != "None":
             api_req += f"&proxy={urllib.parse.quote(proxy)}"
+        
         sess = get_session()
-        r = sess.get(api_req, timeout=20)
+        # Timeout badha diya taaki slow internet pe galat result na aaye
+        r = sess.get(api_req, timeout=30) 
+        
+        # Agar API hi down hai (Error 500/404), toh site ko dead mat maano
+        if r.status_code != 200:
+            return True # Safe side ke liye True bhejo taaki delete na ho
+
         text = r.text.lower()
 
         if "site dead" in text:
@@ -177,6 +192,7 @@ def verify_site(url, proxy=None):
         if proxy and "proxy dead" in text:
             return verify_site(url, None)
 
+        # JSON Parse Error Handling
         try:
             json_data = r.json()
             clean_msg = json_data.get("Response", "") or json_data.get("message", r.text)
@@ -186,19 +202,21 @@ def verify_site(url, proxy=None):
         msg_lower = clean_msg.lower()
 
         live_keywords = [
-    "card_declined", "declined", "invalid card", "incorrect_cvc", "incorrect cvc",
-    "generic error", "generic_error", "payment failed", "transaction declined",
-    "insufficient_funds", "insufficient funds", "do not honor", "gateway rejected",
-    "3ds", "3d secure", "suspicious activity",
-    "blocked", "blocked for fraud", "risky transaction", "security check failed",
-    "avs mismatch", "cvv mismatch", "expired card", "insufficient balance"
-]
+            "card_declined", "declined", "invalid card", "incorrect_cvc", "incorrect cvc",
+            "generic error", "generic_error", "payment failed", "transaction declined",
+            "insufficient_funds", "insufficient funds", "do not honor", "gateway rejected",
+            "3ds", "3d secure", "suspicious activity",
+            "blocked", "blocked for fraud", "risky transaction", "security check failed",
+            "avs mismatch", "cvv mismatch", "expired card", "insufficient balance"
+        ]
 
         if any(kw in msg_lower for kw in live_keywords):
             return True
         return False
+        
     except Exception as e:
-        return False
+        print(f"Verification Network Error: {e}")
+        return True # Error aane par site delete mat karo, assume karo live hai
 
 def extract_content_from_message(message):
     content = []
@@ -207,7 +225,14 @@ def extract_content_from_message(message):
         try:
             file_info = bot.get_file(target.document.file_id)
             downloaded = bot.download_file(file_info.file_path)
-            content = downloaded.decode('utf-8', errors='ignore').splitlines()
+            
+            # Try UTF-8 first, then fallback to Latin-1 (Crash Proof)
+            try:
+                decoded = downloaded.decode('utf-8')
+            except UnicodeDecodeError:
+                decoded = downloaded.decode('latin-1')
+                
+            content = decoded.splitlines()
         except Exception as e:
             print(f"Error extracting document: {e}")
     elif target.text:
@@ -1025,12 +1050,18 @@ def worker(chat_id, threads):
     session = active_sessions.get(chat_id)
     if not session:
         return
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        for cc in session.items:
-            if session.stop_signal: 
-                break
-            executor.submit(check_cc_logic, cc, session, chat_id)
-    session.is_running = False
+    
+    try:
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            for cc in session.items:
+                if session.stop_signal: 
+                    break
+                executor.submit(check_cc_logic, cc, session, chat_id)
+    except Exception as e:
+        print(f"Worker Error: {e}")
+    finally:
+        # Ye part zaroori hai: Session khatam hone par flag false karo
+        session.is_running = False
 
 def status_updater(chat_id, message_id):
     session = active_sessions.get(chat_id)
@@ -1076,8 +1107,11 @@ def status_updater(chat_id, message_id):
         if text != last_text:
             try:
                 bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=stop_btn)
-            except:
-                pass
+            except Exception as e:
+                # Agar "Too Many Requests" error aaye toh thoda wait karo
+                if "429" in str(e):
+                    time.sleep(5)
+                pass # Baaki errors ignore karo taaki bot na ruke
             last_text = text
         time.sleep(3)
 
@@ -1101,6 +1135,9 @@ def status_updater(chat_id, message_id):
         bot.delete_message(chat_id, message_id)
     except:
         pass
+    
+    # 👇 YE LINE ADD KARO (RAM Clear karne ke liye)
+    active_sessions.pop(chat_id, None)
 
 @bot.callback_query_handler(func=lambda call: call.data == "stop_all")
 def stop_all(call):
