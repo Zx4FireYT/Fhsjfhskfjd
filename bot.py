@@ -386,14 +386,14 @@ def safe_md(text):
 
 # ================= COMMANDS =================
 @bot.message_handler(commands=['start'])
-@user_only   # <--- YE LINE ADD KARNI HAI BAS
+@bot.message_handler(commands=['start'])
 def welcome(message):
-    # Andar ka code same rehne do, ya 'if' hata bhi sakte ho, par rehne do koi dikkat nahi.
+    # Pehle check karega agar user allowed hai
     if is_user_allowed(message.from_user.id):
         txt = (
             "💠 𝗦𝗛𝗢𝗣𝗜𝗙𝗬 𝗡𝗘𝗥𝗩𝗘 𝗖𝗘𝗡𝗧𝗘𝗥\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 𝗢𝗽𝗲𝗿𝗮𝘁𝗼𝗿: {message.from_user.first_name}\n"
+            f"👤 𝗢𝗽𝗲𝗿𝗮𝘁𝗼𝗿: {safe_md(message.from_user.first_name)}\n"
             "📡 𝗖𝗼𝗻𝗻𝗲𝗰𝘁𝗶𝗼𝗻: Secure (TLS 1.3)\n"
             "🔋 𝗘𝗻𝗴𝗶𝗻𝗲: Online (v29.0 Final)\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -405,7 +405,7 @@ def welcome(message):
             " › /delpx ➜ 𝗥𝗲𝗺𝗼𝘃𝗲 𝗣𝗿𝗼𝘅𝘆\n"
             " › /txtrm ➜ 𝗪𝗶𝗽𝗲 𝗗𝗮𝘁𝗮\n"
             " › /resites ➜ 𝗥𝗲-𝗖𝗵𝗲𝗰𝗸 𝗦𝗮𝘃𝗲𝗱 𝗦𝗶𝘁𝗲𝘀\n"
-            " › /support ➜ 𝐋𝐢𝐯𝐞 𝐒𝐮𝐩𝐩𝐨𝐫𝐭\n\n"  # 👈 YE LINE ADD KI HAI
+            " › /support ➜ 𝐋𝐢𝐯𝐞 𝐒𝐮𝐩𝐩𝐨𝐫𝐭\n\n"
             "『 🚀 𝗔𝗧𝗧𝗔𝗖𝗞 𝗠𝗢𝗗𝗨𝗟𝗘𝗦 』\n"
             " › /mtxt ➜ ☢️ 𝗠𝗔𝗦𝗦 𝗗𝗘𝗦𝗧𝗥𝗨𝗖𝗧𝗜𝗢𝗡\n"
             " › /chk ➜ 🎯 𝐒𝐈𝐍𝐆𝐋𝐄 𝐒𝐍𝐈𝐏𝐄𝐑\n\n"
@@ -413,7 +413,11 @@ def welcome(message):
             "⚠️ 𝗦𝘆𝘀𝘁𝗲𝗺 𝗶𝘀 𝗿𝗲𝗮𝗱𝘆 𝗳𝗼𝗿 𝗰𝗼𝗺𝗯𝗼 𝗶𝗻𝗷𝗲𝗰𝘁𝗶𝗼𝗻."
         )
         bot.reply_to(message, txt, parse_mode="Markdown")
-
+    
+    # 👇 YE WALA PART MISSING THA (Ab Non-Approved user ko ye msg jayega)
+    else:
+        bot.reply_to(message, "👾 𝐒𝐘𝐒𝐓𝐄𝐌 𝐅𝐀𝐈𝐋𝐔𝐑𝐄\n━━━━━━━━━━━━━━━━━━━━\n❌ Error 403: Forbidden Access\n☠️ User: Unauthorized\n🔌 Connection: 𝐓𝐄𝐑𝐌𝐈𝐍𝐀𝐓𝐄𝐃")
+        
 # ================= PROXY COMMANDS =================
 @bot.message_handler(commands=['setpx'])
 @user_only
