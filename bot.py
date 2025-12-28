@@ -386,7 +386,9 @@ def safe_md(text):
 
 # ================= COMMANDS =================
 @bot.message_handler(commands=['start'])
+@user_only   # <--- YE LINE ADD KARNI HAI BAS
 def welcome(message):
+    # Andar ka code same rehne do, ya 'if' hata bhi sakte ho, par rehne do koi dikkat nahi.
     if is_user_allowed(message.from_user.id):
         txt = (
             "💠 𝗦𝗛𝗢𝗣𝗜𝗙𝗬 𝗡𝗘𝗥𝗩𝗘 𝗖𝗘𝗡𝗧𝗘𝗥\n"
