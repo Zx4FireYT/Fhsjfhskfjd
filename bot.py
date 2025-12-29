@@ -211,8 +211,10 @@ def verify_site(url, proxy=None, retry_count=0):
 
         if "site dead" in text:
             return False
-    if proxy and "proxy dead" in text and retry_count < 1:  # Limit to 1
-        return verify_site(url, None, retry_count + 1)
+
+        # FIX: Yeh line ab sahi indentation ke saath try block ke andar hai
+        if proxy and "proxy dead" in text and retry_count < 1:  # Limit to 1
+            return verify_site(url, None, retry_count + 1)
 
         # JSON Parse Error Handling
         try:
@@ -684,70 +686,117 @@ def start_validation(message, raw_lines):
 
     threading.Thread(target=ui_updater, daemon=True).start()
 
-    def validate(url):
-    if state["stop"]:
+def start_validation(message, raw_lines):
+    if not raw_lines:
+        bot.reply_to(message, "❌ No sites found in message.")
         return
-    state["current"] = url
-    state["response"] = "Testing..."
 
-    try:
-        api_req = f"{API_URL}?cc=5196032154986133|07|27|000&url={urllib.parse.quote(url)}"
-        if state["proxy"]:
-            api_req += f"&proxy={urllib.parse.quote(state['proxy'])}"
+    proxies = load_data(PROXIES_FILE)
+    proxy = proxies[0] if proxies else None
 
-        sess = get_session()
-        r = sess.get(api_req, timeout=20)
+    if proxy:
+        result, details = check_proxy_rotation(proxy)
+        if result == "ROTATING":
+            bot.send_message(message.chat.id, f"✅ Proxy Valid: {details} — Using proxy for validation.")
+        elif result == "STATIC":
+            bot.send_message(message.chat.id, f"⚠️ Proxy Static: {details} — Proceeding without proxy.")
+            proxy = None
+        else:
+            bot.send_message(message.chat.id, f"❌ Proxy Dead: {details} — Proceeding without proxy.")
+            proxy = None
+    else:
+        bot.send_message(message.chat.id, "⚠️ No proxy configured — validating without proxy.")
 
-        text = r.text.lower()
+    potential = extract_clean_urls(raw_lines)
+    if not potential:
+        bot.reply_to(message, "❌ No valid URLs found.")
+        return
 
-        # Strong Check: CAPTCHA = DEAD (sabse pehle check)
-        if "captcha" in text:
-            state["dead"] += 1
-            state["response"] = "DEAD (CAPTCHA) ❌"
+    chat_id = message.chat.id
+    total = len(potential)
+
+    state = {
+        "total": total, "done": 0, "live": 0, "dead": 0,
+        "valid_sites": [], "current": "Starting...", "response": "Initializing",
+        "stop": False, "proxy": proxy
+    }
+    active_validation[chat_id] = state
+
+    status_msg = bot.reply_to(message, build_validation_ui(state), parse_mode="Markdown", reply_markup=stop_button())
+
+    def ui_updater():
+        while not state["stop"] and state["done"] < total:
+            try:
+                bot.edit_message_text(build_validation_ui(state), chat_id, status_msg.message_id,
+                                      parse_mode="Markdown", reply_markup=stop_button())
+            except: pass
+            time.sleep(2)
+
+    threading.Thread(target=ui_updater, daemon=True).start()
+
+    # --- FIX: Yahan Indentation Sahi Ki Gayi Hai ---
+    def validate(url):
+        if state["stop"]:
             return
-
-        # Site Dead Check
-        if "site dead" in text:
-            state["dead"] += 1
-            state["response"] = "DEAD (OFFLINE) ❌"
-            return
+        state["current"] = url
+        state["response"] = "Testing..."
 
         try:
-            json_data = r.json()
-            clean_msg = json_data.get("Response", "") or json_data.get("message", r.text)
-        except:
-            clean_msg = r.text[:100]
+            api_req = f"{API_URL}?cc=5196032154986133|07|27|000&url={urllib.parse.quote(url)}"
+            if state["proxy"]:
+                api_req += f"&proxy={urllib.parse.quote(state['proxy'])}"
 
-        msg_lower = clean_msg.lower()
+            sess = get_session()
+            r = sess.get(api_req, timeout=20)
 
-        # Real Live Keywords (Captcha bilkul nahi hai)
-        live_keywords = [
-            "card_declined", "declined", "invalid card", "incorrect_cvc", "incorrect cvc",
-            "generic error", "generic_error", "payment failed", "transaction declined",
-            "insufficient_funds", "insufficient funds", "do not honor", "gateway rejected",
-            "3ds", "3d secure", "suspicious activity",
-            "blocked", "blocked for fraud", "risky transaction", "security check failed",
-            "avs mismatch", "cvv mismatch", "expired card", "insufficient balance"
-        ]
+            text = r.text.lower()
 
-        if any(kw in msg_lower for kw in live_keywords):
-            state["live"] += 1
-            state["valid_sites"].append(url)
-            state["response"] = "LIVE ✅"
-        else:
+            if "captcha" in text:
+                state["dead"] += 1
+                state["response"] = "DEAD (CAPTCHA) ❌"
+                return
+
+            if "site dead" in text:
+                state["dead"] += 1
+                state["response"] = "DEAD (OFFLINE) ❌"
+                return
+
+            try:
+                json_data = r.json()
+                clean_msg = json_data.get("Response", "") or json_data.get("message", r.text)
+            except:
+                clean_msg = r.text[:100]
+
+            msg_lower = clean_msg.lower()
+
+            live_keywords = [
+                "card_declined", "declined", "invalid card", "incorrect_cvc", "incorrect cvc",
+                "generic error", "generic_error", "payment failed", "transaction declined",
+                "insufficient_funds", "insufficient funds", "do not honor", "gateway rejected",
+                "3ds", "3d secure", "suspicious activity",
+                "blocked", "blocked for fraud", "risky transaction", "security check failed",
+                "avs mismatch", "cvv mismatch", "expired card", "insufficient balance"
+            ]
+
+            if any(kw in msg_lower for kw in live_keywords):
+                state["live"] += 1
+                state["valid_sites"].append(url)
+                state["response"] = "LIVE ✅"
+            else:
+                state["dead"] += 1
+                state["response"] = "DEAD ❌"
+
+        except Exception as e:
+            print(f"ERROR on {url}: {e}")
             state["dead"] += 1
-            state["response"] = "DEAD ❌"
+            state["response"] = "ERROR ⚠️"
 
-    except Exception as e:
-        print(f"ERROR on {url}: {e}")
-        state["dead"] += 1
-        state["response"] = "ERROR ⚠️"
+        finally:
+            with counter_lock:
+                state["done"] += 1
 
-    finally:
-        with counter_lock:  # FIX: Added lock for thread safety (from previous review)
-            state["done"] += 1
+    # --- FIX End ---
 
-    # Correct placement — outside validate function
     with ThreadPoolExecutor(max_workers=VALIDATION_WORKERS) as executor:
         executor.map(validate, potential)
 
@@ -829,35 +878,34 @@ def resites_check(message):
     stop_kb = types.InlineKeyboardMarkup()
     stop_kb.add(types.InlineKeyboardButton("⛔ 𝐓𝐄𝐑𝐌𝐈𝐍𝐀𝐓𝐄 𝐀𝐔𝐃𝐈𝐓 ⛔", callback_data="stop_resites"))
 
-    # Initial Message (Tick 0)
+    # Initial Message
     status_msg = bot.send_message(chat_id, build_nuclear_ui(state, 0), parse_mode="Markdown", reply_markup=stop_kb)
 
-    # UI Updater (Animation Loop)
+    # UI Updater
     def ui_updater():
         tick = 0
         while state["done"] < total and active_recheck.get(chat_id):
-            tick += 1 # Har loop me tick badhega, jisse animation chalegi
+            tick += 1 
             try:
-                # Tick pass kiya function ko
                 bot.edit_message_text(build_nuclear_ui(state, tick), chat_id, status_msg.message_id, parse_mode="Markdown", reply_markup=stop_kb)
             except: pass
-            time.sleep(2) # 2 Second delay for smooth animation
+            time.sleep(2)
 
     threading.Thread(target=ui_updater, daemon=True).start()
 
-    # 5. Worker Logic
-def check_site_worker(site):
-    if not active_recheck.get(chat_id): return
-    state["current"] = site
-    if verify_site(site, proxy):
-        with counter_lock:  # ADD THIS
-            state["live"] += 1
-    else:
-        with counter_lock:  # ADD THIS
-            state["dead"] += 1
-        remove_dead_site(site)
-    with counter_lock:  # ADD THIS
-        state["done"] += 1
+    # 5. Worker Logic (FIXED INDENTATION)
+    def check_site_worker(site):
+        if not active_recheck.get(chat_id): return
+        state["current"] = site
+        if verify_site(site, proxy):
+            with counter_lock:
+                state["live"] += 1
+        else:
+            with counter_lock:
+                state["dead"] += 1
+            remove_dead_site(site)
+        with counter_lock:
+            state["done"] += 1
 
     # 6. Main Runner
     def runner():
