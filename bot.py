@@ -44,6 +44,7 @@ active_validation = {}
 active_sessions = {}
 active_recheck = {}  # <--- YE MISSING THA, ISSE ADD KARO
 proxy_dead_alert_sent = {}
+site_charge_hits = {}
 
 # ================= ANIMATION ENGINE =================
 def play_anim(chat_id, msg_id, frames, delay=0.3):
@@ -338,9 +339,9 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 if session_obj.mode == "single_quick":
                     remove_dead_site(target, chat_id)
                 else:
-                    remove_dead_site(target)
+                    remove_dead_site(target) 
                     session_obj.dead_sites_count += 1
-                with counter_lock:  # FIX: Lock for safe removal
+                with counter_lock:
                     if target in session_obj.sites_pool:
                         session_obj.sites_pool.remove(target)
                 continue
@@ -350,10 +351,14 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 clean_msg = json_data.get("Response") or json_data.get("message") or raw_text
                 gate = json_data.get("Gate", "Shopify")
                 amount = json_data.get("Price", "N/A")
+                
+                # Try to find Real IP from API response first
+                real_ip = json_data.get("ip") or json_data.get("proxy_ip") or json_data.get("ip_address") or json_data.get("remote_addr")
             except:
                 clean_msg = raw_text[:60]
                 gate = "Shopify"
                 amount = "N/A"
+                real_ip = None
 
             msg_lower = clean_msg.lower()
             status = "dead"
@@ -363,44 +368,78 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
 
             if any(k in msg_lower for k in charged_keys):
                 status = "charged"
-                with counter_lock: session_obj.charged += 1
             elif any(k in msg_lower for k in live_keys):
                 status = "live"
-                with counter_lock: session_obj.live += 1
             else:
                 status = "dead"
-                with counter_lock: session_obj.dead += 1
 
-            is_hit = status in ["charged", "live"]
+            # ================= FAKE CHARGED FILTER =================
+            is_fake_charge = False
+            if status == "charged":
+                with counter_lock:
+                    current_hits = site_charge_hits.get(target, 0) + 1
+                    site_charge_hits[target] = current_hits
+                
+                if current_hits > 2:
+                    is_fake_charge = True
+                    if current_hits == 3:
+                        try:
+                            alert_msg = f"⚠️ **FAKE CHARGED DETECTED**\n━━━━━━━━━━━━━━━━━━━━━━━━\n🌐 `{target}`\n🗑️ **Automatically Removed**"
+                            bot.send_message(chat_id, alert_msg, parse_mode="Markdown")
+                        except: pass
+                    remove_dead_site(target) 
+                    with counter_lock:
+                        if target in session_obj.sites_pool:
+                            session_obj.sites_pool.remove(target)
+                        session_obj.dead_sites_count += 1
+                    status = "dead" 
+
+            # Stats Update
+            with counter_lock:
+                if status == "charged": session_obj.charged += 1
+                elif status == "live": session_obj.live += 1
+                else: session_obj.dead += 1
+
+            # Reply Logic
+            is_hit = (status in ["charged", "live"]) and (not is_fake_charge)
             should_reply = is_hit or session_obj.mode == "single_quick"
 
             if should_reply:
                 scheme, c_type, country, bank = get_bin_info(cc_line)
                 time_taken = round(time.time() - session_obj.start_time, 2)
-
+                
                 header = "𝐂𝐡𝐚𝐫𝐠𝐞𝐝" if status == "charged" else "𝐋𝐢𝐯𝐞" if status == "live" else "𝐃𝐞𝐜𝐥𝐢𝐧𝐞𝐝"
                 emoji = "⚡" if status == "charged" else "🔥" if status == "live" else "❌"
 
-                px_display = proxy.split('@')[-1] if "@" in proxy else proxy.split(":")[0] + ":****" if len(proxy.split(":")) == 4 else proxy or "No Proxy"
+                # ================= REAL IP LOGIC =================
+                # 1. Agar API ne IP di hai, wahi use karo
+                if real_ip:
+                    px_display = real_ip
+                # 2. Agar Single Check hai aur API ne IP nahi di, toh khud check karo
+                elif session_obj.mode == "single_quick":
+                    resolved = get_my_ip(proxy)
+                    px_display = resolved if resolved else "Hidden IP"
+                # 3. Mass check mein agar IP nahi mili toh Masked Proxy dikhao
+                else:
+                    px_display = proxy.split('@')[-1] if "@" in proxy else proxy.split(":")[0] + ":****" if len(proxy.split(":")) == 4 else "Rotating Proxy"
+                # =================================================
 
-                final_msg = safe_md(clean_msg)
-                final_gate = safe_md(gate)
-                final_amount = amount if amount == "N/A" else f"$ {amount}"  # FIX: Simple currency format
+                final_amount = amount if amount == "N/A" else f"$ {amount}"
 
                 msg = (
                     f"{header} {emoji}\n"
-                    f"----------------------------------------\n"
-                    f"(🝮︎) Card: `{cc_line}`\n"
-                    f"(🝮︎) Status: {header} {emoji}\n"
-                    f"(🝮︎) Response: {final_msg}\n"
-                    f"(🝮︎) Gateway: {final_gate}\n"
-                    f"----------------------------------------\n"
-                    f"(🝮︎) Bank: {bank}\n"
-                    f"(🝮︎) Type: {scheme} - {c_type}\n"
-                    f"(🝮︎) Country: {country}\n"
-                    f"(🝮︎) Amount: {final_amount}\n"
-                    f"(🝮︎) Time: {time_taken} seconds\n"
-                    f"(🝮︎) Proxy IP: {px_display}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💳 𝐂𝐚𝐫𝐝: `{cc_line}`\n"
+                    f"🛡️ 𝐒𝐭𝐚𝐭𝐮𝐬: {header}\n"
+                    f"📝 𝐑𝐞𝐬𝐩𝐨𝐧𝐬𝐞: {safe_md(clean_msg)}\n"
+                    f"🛍️ 𝐆𝐚𝐭𝐞𝐰𝐚𝐲: {safe_md(gate)}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🏦 𝐁𝐚𝐧𝐤: {bank}\n"
+                    f"🌍 𝐂𝐨𝐮𝐧𝐭𝐫𝐲: {country}\n"
+                    f"💳 𝐓𝐲𝐩𝐞: {scheme} - {c_type}\n"
+                    f"💲 𝐀𝐦𝐨𝐮𝐧𝐭: {final_amount}\n"
+                    f"⏱️ 𝐓𝐢𝐦𝐞: {time_taken}s\n"
+                    f"🔌 𝐏𝐫𝐨𝐱𝐲: {px_display}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"👑 𝐎𝐖𝐍𝐄𝐑: {OWNER_USERNAME}\n"
                     f"🛠 𝐃𝐄𝐕: BOYS ꭙ H4RE !!"
@@ -413,7 +452,7 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 bot.send_message(chat_id, msg, parse_mode="Markdown")
 
             processed = True
-            time.sleep(1.0)  # Minor: Increased for stability
+            time.sleep(1.0)
             break
 
         except Exception as e:
