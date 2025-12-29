@@ -328,12 +328,13 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
             raw_text = resp.text.strip()
             resp_lower = raw_text.lower()
 
+            # ===== FIX START: PROXY DEAD ERROR HANDLING =====
             if "proxy dead" in resp_lower:
-                if chat_id not in proxy_dead_alert_sent:
-                    bot.send_message(chat_id, "🛑 **CRITICAL ALERT: PROXY DEAD**\nChecking Stopped. Please update proxy.")
-                    proxy_dead_alert_sent[chat_id] = True
-                session_obj.stop_signal = True
-                return
+                # Session STOP nahi karenge, bas Retry karenge
+                # Kyunki rotating proxy me kabhi kabhi bad IP aa jati hai
+                time.sleep(2) # 2 second wait karo taaki IP rotate ho jaye
+                continue # Wapas loop me jao aur dubara try karo
+            # ===== FIX END =====
 
             if "site dead" in resp_lower:
                 if session_obj.mode == "single_quick":
@@ -412,18 +413,14 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 emoji = "⚡" if status == "charged" else "🔥" if status == "live" else "❌"
 
                 # ================= REAL IP LOGIC =================
-                # 1. Agar API ne IP di hai, wahi use karo
                 if real_ip:
                     px_display = real_ip
-                # 2. Agar Single Check hai aur API ne IP nahi di, toh khud check karo
                 elif session_obj.mode == "single_quick":
                     resolved = get_my_ip(proxy)
                     px_display = resolved if resolved else "Hidden IP"
-                # 3. Mass check mein agar IP nahi mili toh Masked Proxy dikhao
                 else:
                     px_display = proxy.split('@')[-1] if "@" in proxy else proxy.split(":")[0] + ":****" if len(proxy.split(":")) == 4 else "Rotating Proxy"
-                # =================================================
-
+                
                 final_amount = amount if amount == "N/A" else f"$ {amount}"
 
                 msg = (
