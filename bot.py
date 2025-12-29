@@ -42,9 +42,11 @@ counter_lock = threading.Lock()
 file_lock = threading.Lock() 
 active_validation = {}
 active_sessions = {}
-active_recheck = {}  # <--- YE MISSING THA, ISSE ADD KARO
+active_recheck = {}
 proxy_dead_alert_sent = {}
 site_charge_hits = {}
+# 👇 YE LINE MISSING HAI, ISSE ADD KARO 👇
+site_charge_msg_ids = {}
 
 # ================= ANIMATION ENGINE =================
 def play_anim(chat_id, msg_id, frames, delay=0.3):
@@ -141,19 +143,22 @@ bin_cache = {}
 def get_bin_info(cc_num):
     try:
         bin_num = cc_num[:6]
-        # Agar BIN pehle se memory me hai, toh wahi se utha lo (Ultra Fast)
         if bin_num in bin_cache:
             return bin_cache[bin_num]
 
-        r = requests.get(BIN_API_URL + bin_num, headers={"User-Agent": ua.random}, timeout=5)
+        # API Call
+        url = f"https://data.handyapi.com/bin/{bin_num}" # Better API for free use
+        r = requests.get(url, headers={"User-Agent": ua.random}, timeout=5)
+        
         if r.status_code == 200:
             data = r.json()
-            scheme = data.get("scheme", "UNKNOWN").upper()
-            c_type = data.get("type", "UNKNOWN").upper()
-            country = data.get("country", {}).get("name", "UNKNOWN").upper()
-            bank = data.get("bank", {}).get("name", "UNKNOWN").upper()
             
-            # Result ko cache (memory) me save kar lo
+            # Safe Parsing (None check ke saath)
+            scheme = (data.get("Scheme") or "UNKNOWN").upper()
+            c_type = (data.get("Type") or "UNKNOWN").upper()
+            country = (data.get("Country", {}).get("Name") or "UNKNOWN").upper()
+            bank = (data.get("Issuer") or "UNKNOWN").upper()
+            
             result = (scheme, c_type, country, bank)
             bin_cache[bin_num] = result
             return result
@@ -328,13 +333,9 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
             raw_text = resp.text.strip()
             resp_lower = raw_text.lower()
 
-            # ===== FIX START: PROXY DEAD ERROR HANDLING =====
             if "proxy dead" in resp_lower:
-                # Session STOP nahi karenge, bas Retry karenge
-                # Kyunki rotating proxy me kabhi kabhi bad IP aa jati hai
-                time.sleep(2) # 2 second wait karo taaki IP rotate ho jaye
-                continue # Wapas loop me jao aur dubara try karo
-            # ===== FIX END =====
+                time.sleep(2) # Retry logic for rotating proxy
+                continue 
 
             if "site dead" in resp_lower:
                 if session_obj.mode == "single_quick":
@@ -352,8 +353,6 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 clean_msg = json_data.get("Response") or json_data.get("message") or raw_text
                 gate = json_data.get("Gate", "Shopify")
                 amount = json_data.get("Price", "N/A")
-                
-                # Try to find Real IP from API response first
                 real_ip = json_data.get("ip") or json_data.get("proxy_ip") or json_data.get("ip_address") or json_data.get("remote_addr")
             except:
                 clean_msg = raw_text[:60]
@@ -381,27 +380,33 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                     current_hits = site_charge_hits.get(target, 0) + 1
                     site_charge_hits[target] = current_hits
                 
+                # Agar 3rd hit fake hai
                 if current_hits > 2:
-                    is_fake_charge = True
+                    is_fake_charge = True # Mark as fake
+                    
+                    # Sirf ek baar alert bhejo
                     if current_hits == 3:
                         try:
-                            alert_msg = f"⚠️ **FAKE CHARGED DETECTED**\n━━━━━━━━━━━━━━━━━━━━━━━━\n🌐 `{target}`\n🗑️ **Automatically Removed**"
+                            alert_msg = f"⚠️ **FAKE CHARGED DETECTED**\n━━━━━━━━━━━━━━━━━━━━━━━━\n🌐 `{target}`\n🗑️ **Removing Site & Ignoring Result**"
                             bot.send_message(chat_id, alert_msg, parse_mode="Markdown")
                         except: pass
+                    
                     remove_dead_site(target) 
                     with counter_lock:
                         if target in session_obj.sites_pool:
                             session_obj.sites_pool.remove(target)
                         session_obj.dead_sites_count += 1
-                    status = "dead" 
+                    
+                    status = "dead" # Status dead set kardo taaki stats kharab na ho
 
-            # Stats Update
+            # Update Stats
             with counter_lock:
                 if status == "charged": session_obj.charged += 1
                 elif status == "live": session_obj.live += 1
                 else: session_obj.dead += 1
 
-            # Reply Logic
+            # Reply Logic: 
+            # Agar Fake Charge hai, toh `is_hit` False ho jayega, aur message nahi jayega.
             is_hit = (status in ["charged", "live"]) and (not is_fake_charge)
             should_reply = is_hit or session_obj.mode == "single_quick"
 
@@ -412,7 +417,6 @@ def check_cc_logic(cc_line, session_obj, chat_id, processing_msg_id=None):
                 header = "𝐂𝐡𝐚𝐫𝐠𝐞𝐝" if status == "charged" else "𝐋𝐢𝐯𝐞" if status == "live" else "𝐃𝐞𝐜𝐥𝐢𝐧𝐞𝐝"
                 emoji = "⚡" if status == "charged" else "🔥" if status == "live" else "❌"
 
-                # ================= REAL IP LOGIC =================
                 if real_ip:
                     px_display = real_ip
                 elif session_obj.mode == "single_quick":
@@ -1186,23 +1190,28 @@ def start_engine(message, mode, sites, proxy, raw_data):
       
     cards = list(set(cards))   
     if not cards: 
-        return bot.reply_to(message, "❌ No Cards Found")   
+        return bot.reply_to(message, "❌ No Valid Cards Found")   
   
     chat_id = message.chat.id   
     session = CheckerSession()   
     session.items = cards   
     session.total = len(cards)   
     session.mode = mode   
-    session.sites_pool = sites   
+    session.sites_pool = list(sites) 
     session.proxy_string = proxy   
     session.start_time = time.time()   
     session.is_running = True   
     active_sessions[chat_id] = session   
   
-    msg = bot.send_message(chat_id, "🚀 **Starting Engine...**")   
+    msg = bot.send_message(chat_id, "🚀 **Starting Engine...**\n⚡ Mode: Turbo Parallel")   
     threading.Thread(target=status_updater, args=(chat_id, msg.message_id)).start()   
   
-    threads = max(10, min(len(sites) // 2, MAX_SAFE_THREADS))   
+    # ===== SPEED OPTIMIZATION =====
+    # Agar sites kam hain (e.g. 50), toh 35 threads chalenge.
+    # Agar sites zyada hain (e.g. 500), toh Max 70 threads chalenge.
+    # Yeh parallel speed badhayega.
+    threads = max(15, min(len(sites), 40))   
+    
     threading.Thread(target=worker, args=(chat_id, threads)).start()
 
 def worker(chat_id, threads):
